@@ -1,7 +1,6 @@
 services:
-  - type: web
+  - type: worker
     name: spamatan-bot
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python 1.py
-    
