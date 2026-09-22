@@ -1,3 +1,4 @@
+
 import sqlite3
 import telebot
 from telebot import types
@@ -36,7 +37,7 @@ def check_subscription(user_id):
         print(f"[-] Kanal kontrol hatası: {e}")
     return False
 
-# --- /start Komutu ve Referans Sistemi ---
+# --- /start Komutu, Kanal Zorunluluğu ve Referans Sistemi ---
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     user_id = message.from_user.id
@@ -56,25 +57,30 @@ def handle_start(message):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     
-    cursor.execute("SELECT user_id, referred_by FROM users WHERE user_id = ?", (user_id,))
-    user = cursor.fetchone()
+    # Kullanıcıyı güvenli bir şekilde ekle (Çakışma / UNIQUE hatasını tamamen önler)
+    cursor.execute("""
+        INSERT OR IGNORE INTO users (user_id, username, referred_by, referrals_count) 
+        VALUES (?, ?, ?, 0)
+    """, (user_id, username, referrer_id))
     
-    if not user:
-        cursor.execute("INSERT INTO users (user_id, username, referred_by) VALUES (?, ?, ?)", 
-                       (user_id, username, referrer_id))
-        
-        if referrer_id:
-            cursor.execute("UPDATE users SET referrals_count = referrals_count + 1 WHERE user_id = ?", (referrer_id,))
-            try:
-                bot.send_message(referrer_id, f"🎉 Tebrikler! Referansınla yeni bir kullanıcı katıldı: @{username}")
-            except:
-                pass
-                
-        conn.commit()
+    # Eğer yeni bota start verdiyse ve referansı varsa davet edenin sayısını artır
+    if cursor.rowcount > 0 and referrer_id:
+        cursor.execute("UPDATE users SET referrals_count = referrals_count + 1 WHERE user_id = ?", (referrer_id,))
+        try:
+            bot.send_message(referrer_id, f"🎉 Tebrikler! Davet ettiğin kişi bota start verdi ve katıldı: @{username}")
+        except:
+            pass
+            
+    conn.commit()
+
+    # Kullanıcının güncel referans sayısını çek
+    cursor.execute("SELECT referrals_count FROM users WHERE user_id = ?", (user_id,))
+    res = cursor.fetchone()
+    ref_count = res[0] if res else 0
     
     conn.close()
 
-    # Kanal abonelik kontrolü
+    # 1. ADIM: Önce Kanal Abonelik Kontrolü (En başta zorunlu!)
     if not check_subscription(user_id):
         markup = types.InlineKeyboardMarkup()
         btn_channel = types.InlineKeyboardButton("📢 Kanala Katıl", url=f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}")
@@ -89,6 +95,23 @@ def handle_start(message):
         )
         return
 
+    # 2. ADIM: En az 1 Kişiyi Davet Etme (Start Verdirme) Zorunluluğu
+    if ref_count < 1:
+        bot_info = bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+        
+        bot.send_message(
+            message.chat.id,
+            f"🔒 **Botu Aktif Etmek İçin Son Adım!**\n\n"
+            f"Kanalımıza katıldın teşekkürler! 🎉 Ancak botu kullanabilmek için en az **1 kişiyi** davet etmen ve o kişinin bota start vermesi gerekiyor.\n\n"
+            f"🔗 **Senin Özel Davet Linkin:**\n`{ref_link}`\n\n"
+            f"👥 Davet edip bota start verdiren kişi sayısı: **{ref_count}/1**\n\n"
+            f"Arkadaşın bota start verdikten sonra buraya gelip tekrar `/start` yaz!",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Tüm şartlar sağlandıysa ana menüyü aç
     show_main_menu(message.chat.id)
 
 # --- Abonelik Kontrol Butonu Callback ---
@@ -98,7 +121,27 @@ def callback_check_sub(call):
     if check_subscription(user_id):
         bot.answer_callback_query(call.id, "✅ Abonelik onaylandı!")
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        show_main_menu(call.message.chat.id)
+        
+        conn = sqlite3.connect("bot_database.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT referrals_count FROM users WHERE user_id = ?", (user_id,))
+        res = cursor.fetchone()
+        ref_count = res[0] if res else 0
+        conn.close()
+
+        if ref_count < 1:
+            bot_info = bot.get_me()
+            ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+            bot.send_message(
+                call.message.chat.id,
+                f"✅ Abonelik onaylandı!\n\n🔒 **Botu Aktif Etmek İçin Son Adım!**\n\n"
+                f"Botu kullanabilmek için en az **1 kişiyi** davet etmen gerekiyor.\n\n"
+                f"🔗 **Senin Özel Davet Linkin:**\n`{ref_link}`\n\n"
+                f"👥 Davet ettiğin kişi sayısı: **{ref_count}/1**",
+                parse_mode="Markdown"
+            )
+        else:
+            show_main_menu(call.message.chat.id)
     else:
         bot.answer_callback_query(call.id, "❌ Henüz kanala abone olmamışsın!", show_alert=True)
 
@@ -122,6 +165,17 @@ def handle_messages(message):
     
     if not check_subscription(user_id):
         bot.send_message(message.chat.id, f"⚠️ Botu kullanmaya devam etmek için önce {CHANNEL_USERNAME} kanalına abone olmalısın!")
+        return
+
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT referrals_count FROM users WHERE user_id = ?", (user_id,))
+    res = cursor.fetchone()
+    ref_count = res[0] if res else 0
+    conn.close()
+
+    if ref_count < 1:
+        bot.send_message(message.chat.id, "⚠️ Botu kullanabilmek için önce en az 1 kişiyi davet etmelisin!")
         return
 
     text = message.text
@@ -149,7 +203,7 @@ def handle_messages(message):
             f"🔗 **Referans Sistemi**\n\n"
             f"Davet Linkin:\n`{ref_link}`\n\n"
             f"👥 Toplam Davet Ettiğin Kişi: **{ref_count}**",
-            parse_mode="Markdown"
+            parse_Mode="Markdown"
         )
 
     elif text == "ℹ️ Bilgi / Panel":
